@@ -747,9 +747,9 @@ int R3LIVE::service_LIO_update()
                         if ( planeValid )
                         {
                             float pd2 = pa * pointSel_tmpt.x + pb * pointSel_tmpt.y + pc * pointSel_tmpt.z + pd;
-                            float s = 1 - 0.9 * fabs( pd2 ) /
-                                              sqrt( sqrt( pointSel_tmpt.x * pointSel_tmpt.x + pointSel_tmpt.y * pointSel_tmpt.y +
-                                                          pointSel_tmpt.z * pointSel_tmpt.z ) );
+                            // float s = 1 - 0.9 * fabs( pd2 ) /
+                            //                   sqrt( sqrt( pointSel_tmpt.x * pointSel_tmpt.x + pointSel_tmpt.y * pointSel_tmpt.y +
+                            //                               pointSel_tmpt.z * pointSel_tmpt.z ) );
                             // ANCHOR -  Point to plane distance
                             double acc_distance = ( ori_pt_dis < m_long_rang_pt_dis ) ? m_maximum_res_dis : 1.0;
                             if ( pd2 < acc_distance )

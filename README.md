@@ -106,6 +106,25 @@ source ~/catkin_ws/devel/setup.bash
 - Validation log output includes projection success/failure counts, out-of-bounds counts, per-camera hit counts, and mean/max color difference when both paths succeed
 - Current limitation: the runtime adapter still feeds a single `Image_frame` because the repository’s live RGB map path is single-camera today, but the C API already accepts a camera array so a future multi-camera adapter can reuse the same core
 
+### 4.2 Offline input: per-frame PCD + per-frame multi-camera JPG
+- Offline executable: `r3live_offline_colorize`
+- Launch file: `/home/runner/work/use_r3live/use_r3live/r3live/launch/r3live_offline_colorize.launch`
+- Config file: `/home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml`
+- Expected frame list format (one frame per line, space-separated):
+  - `timestamp pcd_path tx ty tz qw qx qy qz img_cam0 img_cam1 ...`
+  - `tx ty tz qw qx qy qz` is the LiDAR pose in world coordinates for that frame
+  - image columns must appear in the same order as `offline_colorize/camera_names`
+- Camera parameters are configured once under `offline_colorize/cameras/<camera_name>/...`
+- Output:
+  - accumulated colored map: `output_dir/rgb_map.pcd`
+  - optional per-frame colored clouds: `output_dir/frames/frame_000000_rgb.pcd`
+  - optional offline `.r3live` export if `offline_colorize/save_offline_map=1`
+- `offline_colorize/minimum_pts_size` controls the point dedup spacing before color fusion
+- Run:
+```bash
+roslaunch r3live r3live_offline_colorize.launch
+```
+
 ## 5. Run our examples
 ### 5.1 Download our rosbag files ([r3live_dataset](https://github.com/ziv-lin/r3live_dataset)) 
 Our datasets for evaluation can be download from our [Google drive](https://drive.google.com/drive/folders/15i-TRa0EA8BCbNdARVqPMDsU9JOlagVF?usp=sharing) or [Baidu-NetDisk [百度网盘]](https://pan.baidu.com/s/1zmVxkcwOSul8oTBwaHfuFg) (code提取码: wwxw). We have released totally **9** rosbag files for evaluating r3live, with the introduction of these datasets can be found on this [page](https://github.com/ziv-lin/r3live_dataset).

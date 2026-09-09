@@ -143,6 +143,21 @@ target_link_libraries(r3live_mapping
                           pcl_common 
                           pcl_io) 
 
+add_executable(r3live_offline_colorize src/r3live_offline_colorize.cpp
+                                       ${C_COLORIZE_SOURCES}
+                                       src/rgb_map/offline_map_recorder.cpp
+                                       src/rgb_map/image_frame.cpp
+                                       src/rgb_map/pointcloud_rgbd.cpp
+                                       src/optical_flow/lkpyramid.cpp)
+target_link_libraries(r3live_offline_colorize
+                          ${catkin_LIBRARIES}
+                          ${Boost_LIBRARIES}
+                          ${Boost_FILESYSTEM_LIBRARY}
+                          ${Boost_SERIALIZATION_LIBRARY}
+                          ${OpenCV_LIBRARIES}
+                          pcl_common
+                          pcl_io)
+
 FIND_PACKAGE(CGAL REQUIRED)
 if(CGAL_FOUND)
 	include_directories(${CGAL_INCLUDE_DIRS})

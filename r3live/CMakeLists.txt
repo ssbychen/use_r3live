@@ -8,7 +8,23 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(USE_C_COLORIZE "Use the C colorize core for RGB map projection/sampling" ON)
+option(VERIFY_C_COLORIZE "Compare the C colorize core with the legacy C++ path" OFF)
+option(BUILD_ROS_TARGETS "Build ROS-based online pipeline and utilities" ON)
+
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
+
+if(USE_C_COLORIZE)
+  add_definitions(-DR3LIVE_USE_C_COLORIZE=1)
+else()
+  add_definitions(-DR3LIVE_USE_C_COLORIZE=0)
+endif()
+
+if(VERIFY_C_COLORIZE)
+  add_definitions(-DR3LIVE_VERIFY_C_COLORIZE=1)
+else()
+  add_definitions(-DR3LIVE_VERIFY_C_COLORIZE=0)
+endif()
 
 # Add OpenCV if available
 # set(OpenCV_DIR "/home/zivlin/opt/opencv/build")
@@ -18,15 +34,21 @@ if(Boost_FOUND)
 	LINK_DIRECTORIES(${Boost_LIBRARY_DIRS})
 endif()
 
-find_package(catkin REQUIRED COMPONENTS
-                    roscpp
-                    std_msgs
-                    geometry_msgs
-                    nav_msgs
-                    tf
-                    cv_bridge
-                    livox_ros_driver
-            )
+if(BUILD_ROS_TARGETS)
+  find_package(catkin QUIET COMPONENTS
+                      roscpp
+                      std_msgs
+                      geometry_msgs
+                      nav_msgs
+                      tf
+                      cv_bridge
+                      livox_ros_driver
+              )
+  if(NOT catkin_FOUND)
+    message(WARNING "catkin/livox_ros_driver not found; disabling ROS-based targets and building standalone offline tools only.")
+    set(BUILD_ROS_TARGETS OFF)
+  endif()
+endif()
 
 # find_package(Ceres REQUIRED)
 find_package(PCL REQUIRED)
@@ -57,20 +79,19 @@ endif()
 
 # message(WARNING "OpenCV_VERSION: ${OpenCV_VERSION}")
 
-include_directories(${catkin_INCLUDE_DIRS})
-
-generate_messages(
- DEPENDENCIES
- geometry_msgs
-)
+if(BUILD_ROS_TARGETS)
+  include_directories(${catkin_INCLUDE_DIRS})
+  generate_messages(
+   DEPENDENCIES
+   geometry_msgs
+  )
+endif()
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 find_package(Eigen3)
 include_directories(
-  ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
-  ${livox_ros_driver_INCLUDE_DIRS}
   ./src
   ./src/loam/include
   ./src/tools/
@@ -78,49 +99,82 @@ include_directories(
   ./src/meshing
 )
 
+if(BUILD_ROS_TARGETS)
+  include_directories(
+    ${catkin_INCLUDE_DIRS}
+    ${livox_ros_driver_INCLUDE_DIRS}
+  )
+endif()
 
-catkin_package()
+
+if(BUILD_ROS_TARGETS)
+  catkin_package()
+endif()
+
+set(C_COLORIZE_SOURCES
+  src/c_colorize/colorize.c
+)
+set_source_files_properties(${C_COLORIZE_SOURCES} PROPERTIES LANGUAGE C)
 
 message(STATUS "===== ${PROJECT_NAME}: OpenCV library status: =====")
 message(STATUS "===== OpenCV ersion: ${OpenCV_VERSION}  =====")
 message(STATUS "===== OpenCV libraries: ${OpenCV_LIBS} =====")
 message(STATUS "===== OpenCV include path: ${OpenCV_INCLUDE_DIRS} =====")
 
-add_executable(r3live_LiDAR_front_end src/loam/LiDAR_front_end.cpp)
-target_link_libraries(r3live_LiDAR_front_end ${catkin_LIBRARIES} ${PCL_LIBRARIES})
-if(Ceres_FOUND)
-  message(STATUS "===== Find ceres, Version ${Ceres_VERSION} =====")  
-  include_directories(${CERES_INCLUDE_DIRS})
-  add_executable(r3live_cam_cali src/r3live_cam_cali.cpp)
-  target_link_libraries(r3live_cam_cali ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} ${CERES_LIBRARIES})
+if(BUILD_ROS_TARGETS)
+  add_executable(r3live_LiDAR_front_end src/loam/LiDAR_front_end.cpp)
+  target_link_libraries(r3live_LiDAR_front_end ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+  if(Ceres_FOUND)
+    message(STATUS "===== Find ceres, Version ${Ceres_VERSION} =====")
+    include_directories(${CERES_INCLUDE_DIRS})
+    add_executable(r3live_cam_cali src/r3live_cam_cali.cpp)
+    target_link_libraries(r3live_cam_cali ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} ${CERES_LIBRARIES})
 
-  add_executable(r3live_cam_cali_create_cali_board src/r3live_cam_cali_create_cali_board.cpp)
-  target_link_libraries(r3live_cam_cali_create_cali_board ${catkin_LIBRARIES} ${OpenCV_LIBRARIES})
+    add_executable(r3live_cam_cali_create_cali_board src/r3live_cam_cali_create_cali_board.cpp)
+    target_link_libraries(r3live_cam_cali_create_cali_board ${catkin_LIBRARIES} ${OpenCV_LIBRARIES})
+  endif()
 endif()
 add_executable(test_timer src/tools/test_timer.cpp)
 
-add_executable(r3live_mapping src/r3live.cpp 
-                src/r3live_lio.cpp
-                src/loam/include/kd_tree/ikd_Tree.cpp
-                src/loam/include/FOV_Checker/FOV_Checker.cpp 
-                src/loam/IMU_Processing.cpp
-                src/rgb_map/offline_map_recorder.cpp
-                # From VIO
-                src/r3live_vio.cpp
-                src/optical_flow/lkpyramid.cpp
-                src/rgb_map/rgbmap_tracker.cpp
-                src/rgb_map/image_frame.cpp
-                src/rgb_map/pointcloud_rgbd.cpp
-              )
-target_link_libraries(r3live_mapping 
-                          ${catkin_LIBRARIES}
+if(BUILD_ROS_TARGETS)
+  add_executable(r3live_mapping src/r3live.cpp
+                  src/r3live_lio.cpp
+                  src/loam/include/kd_tree/ikd_Tree.cpp
+                  src/loam/include/FOV_Checker/FOV_Checker.cpp
+                  src/loam/IMU_Processing.cpp
+                  ${C_COLORIZE_SOURCES}
+                  src/rgb_map/offline_map_recorder.cpp
+                  # From VIO
+                  src/r3live_vio.cpp
+                  src/optical_flow/lkpyramid.cpp
+                  src/rgb_map/rgbmap_tracker.cpp
+                  src/rgb_map/image_frame.cpp
+                  src/rgb_map/pointcloud_rgbd.cpp
+                )
+  target_link_libraries(r3live_mapping
+                            ${catkin_LIBRARIES}
+                            ${Boost_LIBRARIES}
+                            ${Boost_FILESYSTEM_LIBRARY}
+                            ${Boost_SERIALIZATION_LIBRARY} # serialization
+                            ${OpenCV_LIBRARIES}
+                            # ${OpenMVS_LIBRARIES}
+                            pcl_common
+                            pcl_io)
+endif()
+
+add_executable(r3live_offline_colorize src/r3live_offline_colorize.cpp
+                                       ${C_COLORIZE_SOURCES}
+                                       src/rgb_map/offline_map_recorder.cpp
+                                       src/rgb_map/image_frame.cpp
+                                       src/rgb_map/pointcloud_rgbd.cpp
+                                       src/optical_flow/lkpyramid.cpp)
+target_link_libraries(r3live_offline_colorize
                           ${Boost_LIBRARIES}
                           ${Boost_FILESYSTEM_LIBRARY}
-                          ${Boost_SERIALIZATION_LIBRARY} # serialization
+                          ${Boost_SERIALIZATION_LIBRARY}
                           ${OpenCV_LIBRARIES}
-                          # ${OpenMVS_LIBRARIES}
-                          pcl_common 
-                          pcl_io) 
+                          pcl_common
+                          pcl_io)
 
 FIND_PACKAGE(CGAL REQUIRED)
 if(CGAL_FOUND)
@@ -131,7 +185,9 @@ if(CGAL_FOUND)
   SET(_USE_BOOST TRUE)
   SET(_USE_OPENMP TRUE)
   SET(_USE_EIGEN TRUE)
+  if(BUILD_ROS_TARGETS)
   add_executable(r3live_meshing src/r3live_reconstruct_mesh.cpp                              
+                                ${C_COLORIZE_SOURCES}
                                 src/rgb_map/image_frame.cpp
                                 src/rgb_map/pointcloud_rgbd.cpp  
                                 # Common
@@ -149,17 +205,18 @@ if(CGAL_FOUND)
                                 src/meshing/MVS/OBJ.cpp
                                 src/meshing/MVS/IBFS.cpp
                                 )
-target_link_libraries(r3live_meshing 
+  target_link_libraries(r3live_meshing
                                   ${catkin_LIBRARIES}
                                   ${Boost_LIBRARIES}
                                   ${Boost_FILESYSTEM_LIBRARY}
                                   ${Boost_SERIALIZATION_LIBRARY} # serialization
                                   ${CGAL_LIBS}
                                   ${OpenCV_LIBRARIES}
-                                  ${JPEG_LIBRARIES} 
+                                  ${JPEG_LIBRARIES}
                                   gmp
-                                  pcl_common 
+                                  pcl_common
                                   pcl_io
                                   pcl_kdtree)
+  endif()
 
 endif()

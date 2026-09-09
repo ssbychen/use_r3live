@@ -47,10 +47,323 @@ Dr. Fu Zhang < fuzhang@hku.hk >.
 */
 #include "pointcloud_rgbd.hpp"
 #include "../optical_flow/lkpyramid.hpp"
+#include "../c_colorize/colorize.h"
+#include <sstream>
 extern Common_tools::Cost_time_logger g_cost_time_logger;
 extern std::shared_ptr<Common_tools::ThreadPool> m_thread_pool_ptr;
 cv::RNG g_rng = cv::RNG(0);
 // std::atomic<long> g_pts_index(0);
+
+#ifndef R3LIVE_USE_C_COLORIZE
+#define R3LIVE_USE_C_COLORIZE 1
+#endif
+
+#ifndef R3LIVE_VERIFY_C_COLORIZE
+#define R3LIVE_VERIFY_C_COLORIZE 0
+#endif
+
+namespace
+{
+enum class ProjectionFailureReason
+{
+    kNone = C_COLORIZE_FAIL_NONE,
+    kBehindCamera = C_COLORIZE_FAIL_BEHIND_CAMERA,
+    kOutOfBounds = C_COLORIZE_FAIL_OUT_OF_BOUNDS,
+    kInvalidInput = C_COLORIZE_FAIL_INVALID_INPUT
+};
+
+struct ColorizeExecutionResult
+{
+    bool                    success = false;
+    ProjectionFailureReason failure_reason = ProjectionFailureReason::kInvalidInput;
+    int                     camera_index = -1;
+    double                  u = 0.0;
+    double                  v = 0.0;
+    double                  camera_distance = 0.0;
+    vec_3                   rgb = vec_3::Zero();
+};
+
+struct ColorizeDebugStats
+{
+    long              projection_success = 0;
+    long              projection_fail = 0;
+    long              behind_camera = 0;
+    long              out_of_bounds = 0;
+    long              invalid_input = 0;
+    long              legacy_projection_disagreement = 0;
+    long              legacy_color_diff_samples = 0;
+    double            legacy_color_diff_sum = 0.0;
+    double            legacy_color_diff_max = 0.0;
+    std::vector<long> per_camera_hits;
+
+    explicit ColorizeDebugStats( size_t camera_count = 1 ) : per_camera_hits( camera_count, 0 ) {}
+
+    void record_result( const ColorizeExecutionResult &result )
+    {
+        if ( result.success )
+        {
+            projection_success++;
+            if ( result.camera_index >= 0 )
+            {
+                if ( per_camera_hits.size() <= static_cast<size_t>( result.camera_index ) )
+                {
+                    per_camera_hits.resize( result.camera_index + 1, 0 );
+                }
+                per_camera_hits[ result.camera_index ]++;
+            }
+            return;
+        }
+
+        projection_fail++;
+        switch ( result.failure_reason )
+        {
+        case ProjectionFailureReason::kBehindCamera:
+            behind_camera++;
+            break;
+        case ProjectionFailureReason::kOutOfBounds:
+            out_of_bounds++;
+            break;
+        default:
+            invalid_input++;
+            break;
+        }
+    }
+
+    void merge( const ColorizeDebugStats &other )
+    {
+        projection_success += other.projection_success;
+        projection_fail += other.projection_fail;
+        behind_camera += other.behind_camera;
+        out_of_bounds += other.out_of_bounds;
+        invalid_input += other.invalid_input;
+        legacy_projection_disagreement += other.legacy_projection_disagreement;
+        legacy_color_diff_samples += other.legacy_color_diff_samples;
+        legacy_color_diff_sum += other.legacy_color_diff_sum;
+        legacy_color_diff_max = std::max( legacy_color_diff_max, other.legacy_color_diff_max );
+        if ( per_camera_hits.size() < other.per_camera_hits.size() )
+        {
+            per_camera_hits.resize( other.per_camera_hits.size(), 0 );
+        }
+        for ( size_t idx = 0; idx < other.per_camera_hits.size(); ++idx )
+        {
+            per_camera_hits[ idx ] += other.per_camera_hits[ idx ];
+        }
+    }
+};
+
+struct ThreadRenderReport
+{
+    double             cost_time = 0.0;
+    long               render_updates = 0;
+    ColorizeDebugStats stats;
+
+    explicit ThreadRenderReport( size_t camera_count = 1 ) : stats( camera_count ) {}
+};
+
+inline pcl::PointXYZI make_pcl_point( const vec_3 &pt_w )
+{
+    pcl::PointXYZI pt;
+    pt.x = pt_w( 0 );
+    pt.y = pt_w( 1 );
+    pt.z = pt_w( 2 );
+    return pt;
+}
+
+ColorizeExecutionResult run_legacy_colorize( const std::shared_ptr< Image_frame > &img_ptr, const vec_3 &pt_w )
+{
+    ColorizeExecutionResult result;
+    if ( img_ptr == nullptr || img_ptr->m_img.empty() )
+    {
+        return result;
+    }
+
+    pcl::PointXYZI pcl_pt = make_pcl_point( pt_w );
+    if ( img_ptr->project_3d_to_2d( pcl_pt, img_ptr->m_cam_K, result.u, result.v, 1.0 ) == false )
+    {
+        result.failure_reason = ProjectionFailureReason::kBehindCamera;
+        return result;
+    }
+    if ( img_ptr->if_2d_points_available( result.u, result.v, 1.0 ) == false )
+    {
+        result.failure_reason = ProjectionFailureReason::kOutOfBounds;
+        return result;
+    }
+
+    result.success = true;
+    result.failure_reason = ProjectionFailureReason::kNone;
+    result.camera_index = 0;
+    result.camera_distance = ( pt_w - img_ptr->m_pose_w2c_t ).norm();
+    result.rgb = img_ptr->get_rgb( result.u, result.v, 0 );
+    return result;
+}
+
+ColorizeExecutionResult run_c_colorize( const std::shared_ptr< Image_frame > &img_ptr, const vec_3 &pt_w )
+{
+    ColorizeExecutionResult result;
+    if ( img_ptr == nullptr || img_ptr->m_img.empty() || img_ptr->m_img.channels() < 3 )
+    {
+        return result;
+    }
+
+    c_colorize_camera_t camera = {};
+    c_colorize_image_t  image = {};
+    c_colorize_result_t c_result = {};
+    Eigen::Matrix3d     rotation = img_ptr->m_pose_c2w_q.toRotationMatrix();
+    const int           image_rows = img_ptr->m_img_rows > 0 ? img_ptr->m_img_rows : img_ptr->m_img.rows;
+    const int           image_cols = img_ptr->m_img_cols > 0 ? img_ptr->m_img_cols : img_ptr->m_img.cols;
+    const double        world_point[ 3 ] = { pt_w( 0 ), pt_w( 1 ), pt_w( 2 ) };
+
+    camera.fx = img_ptr->fx;
+    camera.fy = img_ptr->fy;
+    camera.cx = img_ptr->cx;
+    camera.cy = img_ptr->cy;
+    camera.image_rows = image_rows;
+    camera.image_cols = image_cols;
+    camera.fov_margin = img_ptr->m_fov_margin;
+    for ( int row = 0; row < 3; ++row )
+    {
+        for ( int col = 0; col < 3; ++col )
+        {
+            camera.rotation[ row * 3 + col ] = rotation( row, col );
+        }
+        camera.translation[ row ] = img_ptr->m_pose_c2w_t( row );
+    }
+
+    image.data = img_ptr->m_img.data;
+    image.row_stride = static_cast< int >( img_ptr->m_img.step );
+    image.channels = img_ptr->m_img.channels();
+
+    if ( c_colorize_select_point( &camera, &image, 1, world_point, C_COLORIZE_SAMPLE_BILINEAR,
+                                  C_COLORIZE_SELECT_NEAREST_DISTANCE, &c_result ) == 0 )
+    {
+        result.failure_reason = static_cast< ProjectionFailureReason >( c_result.failure_reason );
+        return result;
+    }
+
+    result.success = true;
+    result.failure_reason = ProjectionFailureReason::kNone;
+    result.camera_index = c_result.camera_index;
+    result.u = c_result.u;
+    result.v = c_result.v;
+    result.camera_distance = ( pt_w - img_ptr->m_pose_w2c_t ).norm();
+    result.rgb = vec_3( c_result.bgr[ 0 ], c_result.bgr[ 1 ], c_result.bgr[ 2 ] );
+    return result;
+}
+
+void record_colorize_comparison( const ColorizeExecutionResult &c_result, const ColorizeExecutionResult &legacy_result,
+                                 ColorizeDebugStats *stats )
+{
+    if ( stats == nullptr )
+    {
+        return;
+    }
+    if ( c_result.success != legacy_result.success )
+    {
+        stats->legacy_projection_disagreement++;
+        return;
+    }
+    if ( c_result.success == false )
+    {
+        return;
+    }
+    const double diff_b = std::abs( c_result.rgb( 0 ) - legacy_result.rgb( 0 ) );
+    const double diff_g = std::abs( c_result.rgb( 1 ) - legacy_result.rgb( 1 ) );
+    const double diff_r = std::abs( c_result.rgb( 2 ) - legacy_result.rgb( 2 ) );
+    const double diff_mean = ( diff_b + diff_g + diff_r ) / 3.0;
+    const double diff_max = std::max( diff_b, std::max( diff_g, diff_r ) );
+    stats->legacy_color_diff_samples++;
+    stats->legacy_color_diff_sum += diff_mean;
+    stats->legacy_color_diff_max = std::max( stats->legacy_color_diff_max, diff_max );
+}
+
+ColorizeExecutionResult run_active_colorize( const std::shared_ptr< Image_frame > &img_ptr, const vec_3 &pt_w,
+                                             ColorizeDebugStats *stats )
+{
+#if R3LIVE_USE_C_COLORIZE
+    ColorizeExecutionResult active_result = run_c_colorize( img_ptr, pt_w );
+    ColorizeExecutionResult legacy_result;
+#if R3LIVE_VERIFY_C_COLORIZE
+    legacy_result = run_legacy_colorize( img_ptr, pt_w );
+    record_colorize_comparison( active_result, legacy_result, stats );
+#endif
+#else
+    ColorizeExecutionResult active_result = run_legacy_colorize( img_ptr, pt_w );
+#if R3LIVE_VERIFY_C_COLORIZE
+    ColorizeExecutionResult c_result = run_c_colorize( img_ptr, pt_w );
+    record_colorize_comparison( c_result, active_result, stats );
+#endif
+#endif
+
+    if ( stats != nullptr )
+    {
+        stats->record_result( active_result );
+    }
+    return active_result;
+}
+
+long apply_color_to_point( const std::shared_ptr< RGB_pts > &rgb_pt, const ColorizeExecutionResult &result,
+                           const double obs_time )
+{
+    if ( result.success == false )
+    {
+        return 0;
+    }
+
+    const long rgb_updated = rgb_pt->update_rgb( result.rgb, result.camera_distance,
+                                                 vec_3( image_obs_cov, image_obs_cov, image_obs_cov ), obs_time );
+    return rgb_updated;
+}
+
+void apply_gray_to_point( const std::shared_ptr< Image_frame > &img_ptr, const std::shared_ptr< RGB_pts > &rgb_pt,
+                          const ColorizeExecutionResult &result )
+{
+    if ( result.success == false )
+    {
+        return;
+    }
+
+    vec_2  gama_bak = img_ptr->m_gama_para;
+    double u = result.u;
+    double v = result.v;
+    img_ptr->m_gama_para = vec_2( 1.0, 0.0 );
+    const double gray = img_ptr->get_grey_color( u, v, 0 );
+    rgb_pt->update_gray( gray, result.camera_distance );
+    img_ptr->m_gama_para = gama_bak;
+}
+
+void log_colorize_stats( const char *tag, const std::shared_ptr< Image_frame > &img_ptr, const ColorizeDebugStats &stats,
+                         const long render_updates )
+{
+#if R3LIVE_VERIFY_C_COLORIZE
+    std::ostringstream oss;
+    oss << "[" << tag << "] frame=" << img_ptr->m_frame_idx << " proj_ok=" << stats.projection_success
+        << " proj_fail=" << stats.projection_fail << " behind=" << stats.behind_camera << " oob=" << stats.out_of_bounds
+        << " invalid=" << stats.invalid_input << " render_updates=" << render_updates << " per_camera=[";
+    for ( size_t idx = 0; idx < stats.per_camera_hits.size(); ++idx )
+    {
+        if ( idx )
+        {
+            oss << ",";
+        }
+        oss << idx << ":" << stats.per_camera_hits[ idx ];
+    }
+    oss << "]";
+    if ( stats.legacy_color_diff_samples > 0 )
+    {
+        oss << " legacy_diff_mean=" << ( stats.legacy_color_diff_sum / stats.legacy_color_diff_samples )
+            << " legacy_diff_max=" << stats.legacy_color_diff_max;
+    }
+    oss << " legacy_proj_diff=" << stats.legacy_projection_disagreement;
+    scope_color( ANSI_COLOR_CYAN_BOLD );
+    cout << oss.str() << ANSI_COLOR_RESET << endl;
+#else
+    (void)tag;
+    (void)img_ptr;
+    (void)stats;
+    (void)render_updates;
+#endif
+}
+} // namespace
 
 void RGB_pts::set_pos(const vec_3 &pos)
 {
@@ -368,70 +681,48 @@ void Global_map::render_pts_in_voxels(std::shared_ptr<Image_frame> &img_ptr, std
 {
     Common_tools::Timer tim;
     tim.tic();
-    double u, v;
-    int hit_count = 0;
     int pt_size = pts_for_render.size();
+    long render_updates = 0;
+    ColorizeDebugStats stats( 1 );
     m_last_updated_frame_idx = img_ptr->m_frame_idx;
     for (int i = 0; i < pt_size; i++)
     {
-
         vec_3 pt_w = pts_for_render[i]->get_pos();
-        bool res = img_ptr->project_3d_point_in_this_img(pt_w, u, v, nullptr, 1.0);
-        if (res == false)
+        ColorizeExecutionResult colorized = run_active_colorize( img_ptr, pt_w, &stats );
+        if ( colorized.success == false )
         {
             continue;
         }
-        vec_3 pt_cam = (pt_w - img_ptr->m_pose_w2c_t);
-        hit_count++;
-        vec_2 gama_bak = img_ptr->m_gama_para;
-        img_ptr->m_gama_para = vec_2(1.0, 0.0); // Render using normal value?
-        double gray = img_ptr->get_grey_color(u, v, 0);
-        vec_3 rgb_color = img_ptr->get_rgb(u, v, 0);
-        pts_for_render[i]->update_gray(gray, pt_cam.norm());
-        pts_for_render[i]->update_rgb(rgb_color, pt_cam.norm(), vec_3(image_obs_cov, image_obs_cov, image_obs_cov), obs_time);
-        img_ptr->m_gama_para = gama_bak;
-        // m_rgb_pts_vec[i]->update_rgb( vec_3(gray, gray, gray) );
+        apply_gray_to_point( img_ptr, pts_for_render[ i ], colorized );
+        render_updates += apply_color_to_point( pts_for_render[ i ], colorized, obs_time );
     }
-    // cout << "Render cost time = " << tim.toc() << endl;
-    // cout << "Total hit count = " << hit_count << endl;
+    log_colorize_stats( "render_single", img_ptr, stats, render_updates );
 }
 
 Common_tools::Cost_time_logger cost_time_logger_render("/home/ziv/temp/render_thr.log");
 
-std::atomic<long> render_pts_count ;
-static inline double thread_render_pts_in_voxel(const int & pt_start, const int & pt_end, const std::shared_ptr<Image_frame> & img_ptr,
-                                                const std::vector<RGB_voxel_ptr> * voxels_for_render, const double obs_time)
+static inline ThreadRenderReport thread_render_pts_in_voxel(const int & pt_start, const int & pt_end, const std::shared_ptr<Image_frame> & img_ptr,
+                                                            const std::vector<RGB_voxel_ptr> * voxels_for_render, const double obs_time)
 {
-    vec_3 pt_w;
-    vec_3 rgb_color;
-    double u, v;
-    double pt_cam_norm;
+    ThreadRenderReport report( 1 );
     Common_tools::Timer tim;
     tim.tic();
     for (int voxel_idx = pt_start; voxel_idx < pt_end; voxel_idx++)
     {
-        // continue;
         RGB_voxel_ptr voxel_ptr = (*voxels_for_render)[ voxel_idx ];
         for ( int pt_idx = 0; pt_idx < voxel_ptr->m_pts_in_grid.size(); pt_idx++ )
         {
-            pt_w = voxel_ptr->m_pts_in_grid[pt_idx]->get_pos();
-            if ( img_ptr->project_3d_point_in_this_img( pt_w, u, v, nullptr, 1.0 ) == false )
+            vec_3 pt_w = voxel_ptr->m_pts_in_grid[ pt_idx ]->get_pos();
+            ColorizeExecutionResult colorized = run_active_colorize( img_ptr, pt_w, &report.stats );
+            if ( colorized.success == false )
             {
                 continue;
             }
-            pt_cam_norm = ( pt_w - img_ptr->m_pose_w2c_t ).norm();
-            // double gray = img_ptr->get_grey_color(u, v, 0);
-            // pts_for_render[i]->update_gray(gray, pt_cam_norm);
-            rgb_color = img_ptr->get_rgb( u, v, 0 );
-            if (  voxel_ptr->m_pts_in_grid[pt_idx]->update_rgb(
-                     rgb_color, pt_cam_norm, vec_3( image_obs_cov, image_obs_cov, image_obs_cov ), obs_time ) )
-            {
-                render_pts_count++;
-            }
+            report.render_updates += apply_color_to_point( voxel_ptr->m_pts_in_grid[ pt_idx ], colorized, obs_time );
         }
     }
-    double cost_time = tim.toc() * 100;
-    return cost_time;
+    report.cost_time = tim.toc() * 100;
+    return report;
 }
 
 std::vector<RGB_voxel_ptr>  g_voxel_for_render;
@@ -443,20 +734,27 @@ void render_pts_in_voxels_mp(std::shared_ptr<Image_frame> &img_ptr, std::unorder
     {
         g_voxel_for_render.push_back(*it);
     }
-    std::vector<std::future<double>> results;
     tim.tic("Render_mp");
     int numbers_of_voxels = g_voxel_for_render.size();
     g_cost_time_logger.record("Pts_num", numbers_of_voxels);
-    render_pts_count= 0 ;
+    long render_updates = 0;
+    ColorizeDebugStats total_stats( 1 );
     if(USING_OPENCV_TBB)
     {
+        std::mutex stats_mutex;
         cv::parallel_for_(cv::Range(0, numbers_of_voxels), [&](const cv::Range &r)
-                          { thread_render_pts_in_voxel(r.start, r.end, img_ptr, &g_voxel_for_render, obs_time); });
+                          {
+                              ThreadRenderReport report = thread_render_pts_in_voxel(r.start, r.end, img_ptr, &g_voxel_for_render, obs_time);
+                              std::lock_guard<std::mutex> lock(stats_mutex);
+                              render_updates += report.render_updates;
+                              total_stats.merge(report.stats);
+                          });
     }
     else
     {
         int num_of_threads = std::min(8*2, (int)numbers_of_voxels);
         // results.clear();
+        std::vector<std::future<ThreadRenderReport>> results;
         results.resize(num_of_threads);
         tim.tic("Com");
         for (int thr = 0; thr < num_of_threads; thr++)
@@ -470,8 +768,10 @@ void render_pts_in_voxels_mp(std::shared_ptr<Image_frame> &img_ptr, std::unorder
         tim.tic("wait_Opm");
         for (int thr = 0; thr < num_of_threads; thr++)
         {
-            double cost_time = results[thr].get();
-            cost_time_logger_render.record(std::string("T_").append(std::to_string(thr)), cost_time );
+            ThreadRenderReport report = results[thr].get();
+            render_updates += report.render_updates;
+            total_stats.merge( report.stats );
+            cost_time_logger_render.record(std::string("T_").append(std::to_string(thr)), report.cost_time );
         }
         g_cost_time_logger.record(tim, "wait_Opm");
         cost_time_logger_render.record(tim, "wait_Opm");
@@ -479,7 +779,8 @@ void render_pts_in_voxels_mp(std::shared_ptr<Image_frame> &img_ptr, std::unorder
     // img_ptr->release_image();
     cost_time_logger_render.flush_d();
     g_cost_time_logger.record(tim, "Render_mp");
-    g_cost_time_logger.record("Pts_num_r", render_pts_count);
+    g_cost_time_logger.record("Pts_num_r", render_updates);
+    log_colorize_stats( "render_mp", img_ptr, total_stats, render_updates );
     
 }
 

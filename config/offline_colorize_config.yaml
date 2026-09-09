@@ -1,0 +1,44 @@
+offline_colorize:
+  dataset_root: "/tmp/r3live_offline_dataset"
+  input_mode: "directory_layout"   # directory_layout | frame_list
+  frame_list: "frames.txt"
+  pose_dir: "pos"
+  pcd_dir: "pcd"
+  image_extension: ".jpg"
+  output_dir: "/tmp/r3live_offline_output"
+  append_global_map_point_step: 1
+  minimum_pts_size: 0.05
+  save_frame_colored_pcd: 1
+  save_offline_map: 0
+  use_frame_pose: 1                          # 1: require frame pose input, 0: single-frame/no-pose mode
+  frame_point_in_world: 0
+  camera_selection_mode: "nearest_distance"   # nearest_distance | first_valid
+  sample_mode: "bilinear"                     # bilinear | nearest
+  camera_names: ["cam0", "cam1"]
+  cameras:
+    cam0:
+      image_width: 1280
+      image_height: 1024
+      camera_intrinsic:
+        [863.4241, 0.0, 640.6808,
+         0.0, 863.4171, 518.3392,
+         0.0, 0.0, 1.0]
+      camera_dist_coeffs: [-0.1080, 0.1050, -1.2872e-04, 5.7923e-05, -0.0222]
+      lidar_ext_R:
+        [1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0,
+         0.0, 0.0, 1.0]
+      lidar_ext_t: [0.0, 0.0, 0.0]
+    cam1:
+      image_width: 1280
+      image_height: 1024
+      camera_intrinsic:
+        [863.4241, 0.0, 640.6808,
+         0.0, 863.4171, 518.3392,
+         0.0, 0.0, 1.0]
+      camera_dist_coeffs: [-0.1080, 0.1050, -1.2872e-04, 5.7923e-05, -0.0222]
+      lidar_ext_R:
+        [1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0,
+         0.0, 0.0, 1.0]
+      lidar_ext_t: [0.0, 0.0, 0.0]

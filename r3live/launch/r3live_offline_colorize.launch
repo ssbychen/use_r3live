@@ -1,0 +1,4 @@
+<launch>
+    <rosparam command="load" file="$(find r3live)/../config/offline_colorize_config.yaml" />
+    <node pkg="r3live" type="r3live_offline_colorize" name="r3live_offline_colorize" output="screen" required="true" />
+</launch>

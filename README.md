@@ -95,6 +95,72 @@ catkin_make
 source ~/catkin_ws/devel/setup.bash
 ```
 
+### 4.1 C colorize core
+- Core C module: `r3live/src/c_colorize/colorize.h` and `r3live/src/c_colorize/colorize.c`
+- C++ adapter path: `r3live/src/rgb_map/pointcloud_rgbd.cpp`
+- Original colorization path: `r3live/src/r3live_vio.cpp` triggers rendering, `r3live/src/rgb_map/pointcloud_rgbd.cpp` selects/map points and updates RGB state, and `r3live/src/rgb_map/image_frame.cpp` performs projection plus bilinear image sampling
+- Adapter-only dependencies kept in C++: `Eigen` pose/intrinsic storage, `OpenCV` `cv::Mat` image ownership, `PCL` point containers, STL/threading, and ROS call sites
+- Build switches:
+  - `-DUSE_C_COLORIZE=ON|OFF` selects the new C core or the legacy C++ colorization path
+  - `-DVERIFY_C_COLORIZE=ON` keeps the active path unchanged but prints validation statistics against the legacy path
+- Validation log output includes projection success/failure counts, out-of-bounds counts, per-camera hit counts, and mean/max color difference when both paths succeed
+- Current limitation: the runtime adapter still feeds a single `Image_frame` because the repository’s live RGB map path is single-camera today, but the C API already accepts a camera array so a future multi-camera adapter can reuse the same core
+
+### 4.2 Offline input: per-frame PCD + per-frame multi-camera JPG
+- Offline executable: `r3live_offline_colorize`
+- Config file: `/home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml`
+- The offline executable no longer depends on ROS runtime or the ROS parameter server; it reads this YAML config file directly
+- Default interface now supports this directory layout directly:
+```text
+dataset_root/
+├── pos/000000.txt
+├── pcd/000000.pcd
+├── cam0/000000.jpg
+└── cam1/000000.jpg
+```
+- Enable the directory-based interface with:
+  - `offline_colorize/input_mode: "directory_layout"`
+  - `offline_colorize/pose_dir: "pos"`
+  - `offline_colorize/pcd_dir: "pcd"`
+  - `offline_colorize/image_extension: ".jpg"`
+- `offline_colorize/use_frame_pose: 1` keeps the original pose-based behavior; set it to `0` for single-frame/no-pose input
+- For directory mode, frames are matched by basename; for example `pcd/000123.pcd` must pair with `pos/000123.txt`, `cam0/000123.jpg`, `cam1/000123.jpg`, ...
+- Pose file format for each `pos/<frame>.txt`:
+  - `qw qx qy qz tx ty tz`
+  - or `timestamp qw qx qy qz tx ty tz`
+- Expected frame list format (one frame per line, space-separated):
+  - `timestamp pcd_path tx ty tz qw qx qy qz img_cam0 img_cam1 ...`
+  - `tx ty tz qw qx qy qz` is the LiDAR pose in world coordinates for that frame
+  - image columns must appear in the same order as `offline_colorize/camera_names`
+- When `offline_colorize/use_frame_pose: 0`, `pos/<frame>.txt` is not required and frame-list mode also accepts:
+  - `timestamp pcd_path img_cam0 img_cam1 ...`
+- In no-pose mode, LiDAR pose defaults to identity for every frame, so this mode is intended for single-frame colorization or already world-aligned point clouds
+- Camera parameters are configured once under `offline_colorize/cameras/<camera_name>/...`
+- Output:
+  - accumulated colored map: `output_dir/rgb_map.pcd`
+  - optional per-frame colored clouds: `output_dir/frames/frame_000000_rgb.pcd`
+  - optional offline `.r3live` export if `offline_colorize/save_offline_map=1`
+- `offline_colorize/minimum_pts_size` controls the point dedup spacing before color fusion
+- Run without ROS:
+```bash
+/path/to/r3live_offline_colorize /home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml
+```
+- Optional dataset root override:
+```bash
+/path/to/r3live_offline_colorize /home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml /data/my_seq
+```
+- Example no-pose single-frame setup:
+```text
+dataset_root/
+├── pcd/000000.pcd
+├── cam0/000000.jpg
+└── cam1/000000.jpg
+```
+- Use:
+  - `offline_colorize/input_mode: "directory_layout"`
+  - `offline_colorize/use_frame_pose: 0`
+  - `offline_colorize/frame_point_in_world: 0` when the PCD is still in LiDAR coordinates
+
 ## 5. Run our examples
 ### 5.1 Download our rosbag files ([r3live_dataset](https://github.com/ziv-lin/r3live_dataset)) 
 Our datasets for evaluation can be download from our [Google drive](https://drive.google.com/drive/folders/15i-TRa0EA8BCbNdARVqPMDsU9JOlagVF?usp=sharing) or [Baidu-NetDisk [百度网盘]](https://pan.baidu.com/s/1zmVxkcwOSul8oTBwaHfuFg) (code提取码: wwxw). We have released totally **9** rosbag files for evaluating r3live, with the introduction of these datasets can be found on this [page](https://github.com/ziv-lin/r3live_dataset).

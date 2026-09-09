@@ -3,19 +3,19 @@
 #include <dirent.h>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <vector>
 #include <cstring>
 
-#include <ros/ros.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <pcl/io/pcd_io.h>
 
 #include "tools_color_printf.hpp"
 #include "tools_data_io.hpp"
-#include "tools_ros.hpp"
 #include "rgb_map/image_frame.hpp"
 #include "rgb_map/pointcloud_rgbd.hpp"
 #include "rgb_map/offline_map_recorder.hpp"
@@ -79,6 +79,26 @@ struct OfflineStats
             per_camera_hits[ idx ] += other.per_camera_hits[ idx ];
         }
     }
+};
+
+struct OfflineAppConfig
+{
+    std::string               config_path;
+    std::string               dataset_root;
+    std::string               input_mode = "directory_layout";
+    std::string               frame_list = "frames.txt";
+    std::string               pose_dir = "pos";
+    std::string               pcd_dir = "pcd";
+    std::string               image_extension = ".jpg";
+    std::string               output_dir;
+    std::string               camera_selection_mode = "nearest_distance";
+    std::string               sample_mode = "bilinear";
+    std::vector< std::string > camera_names;
+    int                       append_global_map_point_step = 1;
+    int                       save_frame_colored_pcd = 1;
+    int                       save_offline_map = 0;
+    int                       frame_point_in_world = 0;
+    double                    minimum_pts_size = 0.05;
 };
 
 std::string trim_copy( const std::string &input )
@@ -218,17 +238,63 @@ bool load_pose_file( const std::string &pose_path, OfflineFrameEntry &frame )
     return true;
 }
 
-bool load_camera_config( ros::NodeHandle &nh, const std::string &camera_name, OfflineCameraConfig &camera )
+bool read_string_array( const cv::FileNode &node, std::vector< std::string > &values )
 {
-    const std::string prefix = std::string( "offline_colorize/cameras/" ).append( camera_name ).append( "/" );
+    if ( node.empty() || node.isSeq() == false )
+    {
+        return false;
+    }
+
+    values.clear();
+    for ( cv::FileNodeIterator it = node.begin(); it != node.end(); ++it )
+    {
+        values.push_back( ( std::string )*it );
+    }
+    return true;
+}
+
+bool read_double_array( const cv::FileNode &node, std::vector< double > &values )
+{
+    if ( node.empty() || node.isSeq() == false )
+    {
+        return false;
+    }
+
+    values.clear();
+    for ( cv::FileNodeIterator it = node.begin(); it != node.end(); ++it )
+    {
+        values.push_back( ( double )*it );
+    }
+    return true;
+}
+
+template < typename T >
+void read_scalar_or_default( const cv::FileNode &parent, const std::string &key, T &value )
+{
+    const cv::FileNode node = parent[ key ];
+    if ( node.empty() == false )
+    {
+        node >> value;
+    }
+}
+
+bool load_camera_config( const cv::FileNode &offline_node, const std::string &camera_name, OfflineCameraConfig &camera )
+{
     std::vector< double > intrinsic_data, dist_coeffs_data, ext_R_data, ext_t_data;
+    const cv::FileNode    camera_node = offline_node[ "cameras" ][ camera_name ];
     camera.name = camera_name;
-    nh.getParam( prefix + "camera_intrinsic", intrinsic_data );
-    nh.getParam( prefix + "camera_dist_coeffs", dist_coeffs_data );
-    nh.getParam( prefix + "lidar_ext_R", ext_R_data );
-    nh.getParam( prefix + "lidar_ext_t", ext_t_data );
-    Common_tools::get_ros_parameter( nh, prefix + "image_width", camera.image_width, 0 );
-    Common_tools::get_ros_parameter( nh, prefix + "image_height", camera.image_height, 0 );
+    if ( camera_node.empty() )
+    {
+        cout << ANSI_COLOR_RED_BOLD << "Missing camera config for " << camera_name << ANSI_COLOR_RESET << endl;
+        return false;
+    }
+
+    read_double_array( camera_node[ "camera_intrinsic" ], intrinsic_data );
+    read_double_array( camera_node[ "camera_dist_coeffs" ], dist_coeffs_data );
+    read_double_array( camera_node[ "lidar_ext_R" ], ext_R_data );
+    read_double_array( camera_node[ "lidar_ext_t" ], ext_t_data );
+    read_scalar_or_default( camera_node, "image_width", camera.image_width );
+    read_scalar_or_default( camera_node, "image_height", camera.image_height );
 
     if ( intrinsic_data.size() != 9 || dist_coeffs_data.size() != 5 || ext_R_data.size() != 9 || ext_t_data.size() != 3 )
     {
@@ -241,6 +307,51 @@ bool load_camera_config( ros::NodeHandle &nh, const std::string &camera_name, Of
     camera.lidar_ext_R = Eigen::Map< Eigen::Matrix< double, 3, 3, Eigen::RowMajor > >( ext_R_data.data() );
     camera.lidar_ext_t = Eigen::Map< Eigen::Matrix< double, 3, 1 > >( ext_t_data.data() );
     return true;
+}
+
+bool load_app_config( const std::string &config_path, OfflineAppConfig &config )
+{
+    cv::FileStorage fs( config_path, cv::FileStorage::READ );
+    if ( fs.isOpened() == false )
+    {
+        cout << ANSI_COLOR_RED_BOLD << "Failed to open config file: " << config_path << ANSI_COLOR_RESET << endl;
+        return false;
+    }
+
+    const cv::FileNode offline_node = fs[ "offline_colorize" ];
+    if ( offline_node.empty() )
+    {
+        cout << ANSI_COLOR_RED_BOLD << "Missing 'offline_colorize' root node in " << config_path << ANSI_COLOR_RESET << endl;
+        return false;
+    }
+
+    config.config_path = config_path;
+    read_scalar_or_default( offline_node, "dataset_root", config.dataset_root );
+    read_scalar_or_default( offline_node, "input_mode", config.input_mode );
+    read_scalar_or_default( offline_node, "frame_list", config.frame_list );
+    read_scalar_or_default( offline_node, "pose_dir", config.pose_dir );
+    read_scalar_or_default( offline_node, "pcd_dir", config.pcd_dir );
+    read_scalar_or_default( offline_node, "image_extension", config.image_extension );
+    read_scalar_or_default( offline_node, "output_dir", config.output_dir );
+    read_scalar_or_default( offline_node, "camera_selection_mode", config.camera_selection_mode );
+    read_scalar_or_default( offline_node, "sample_mode", config.sample_mode );
+    read_scalar_or_default( offline_node, "append_global_map_point_step", config.append_global_map_point_step );
+    read_scalar_or_default( offline_node, "save_frame_colored_pcd", config.save_frame_colored_pcd );
+    read_scalar_or_default( offline_node, "save_offline_map", config.save_offline_map );
+    read_scalar_or_default( offline_node, "frame_point_in_world", config.frame_point_in_world );
+    read_scalar_or_default( offline_node, "minimum_pts_size", config.minimum_pts_size );
+    read_string_array( offline_node[ "camera_names" ], config.camera_names );
+
+    if ( config.output_dir.empty() )
+    {
+        config.output_dir = std::string( Common_tools::get_home_folder() ).append( "/r3live_offline_output" );
+    }
+    return true;
+}
+
+void print_usage( const char *argv0 )
+{
+    cout << "Usage: " << argv0 << " [config.yaml] [dataset_root_override]" << endl;
 }
 
 bool load_point_cloud_xyzi( const std::string &pcd_path, pcl::PointCloud< pcl::PointXYZI > &cloud )
@@ -613,78 +724,78 @@ void log_stats( const OfflineStats &stats, size_t frame_idx, const std::vector< 
 
 int main( int argc, char **argv )
 {
-    ros::init( argc, argv, "r3live_offline_colorize" );
-    ros::NodeHandle nh;
+    OfflineAppConfig config;
+    std::string      config_path = std::string( ROOT_DIR ).append( "../config/offline_colorize_config.yaml" );
+    if ( argc > 1 )
+    {
+        const std::string arg1 = argv[ 1 ];
+        if ( arg1 == "--help" || arg1 == "-h" )
+        {
+            print_usage( argv[ 0 ] );
+            return 0;
+        }
+        config_path = argv[ 1 ];
+    }
+    if ( load_app_config( config_path, config ) == false )
+    {
+        return -1;
+    }
+    cv::FileStorage config_fs( config.config_path, cv::FileStorage::READ );
+    if ( config_fs.isOpened() == false )
+    {
+        cout << ANSI_COLOR_RED_BOLD << "Failed to reopen config file: " << config.config_path << ANSI_COLOR_RESET << endl;
+        return -1;
+    }
+    const cv::FileNode offline_node = config_fs[ "offline_colorize" ];
+    if ( argc > 2 )
+    {
+        config.dataset_root = argv[ 2 ];
+    }
 
-    std::string dataset_root, frame_list_path, output_dir, selection_mode_name, sample_mode_name;
-    std::string pose_dir, pcd_dir, image_extension, input_mode;
-    std::vector< std::string > camera_names;
-    int append_step = 1;
-    int save_frame_colored_pcd = 1;
-    int save_offline_map = 0;
-    int frame_point_in_world = 0;
-    double minimum_pts_size = 0.05;
+    config.frame_list = resolve_path( config.dataset_root, config.frame_list );
+    Common_tools::create_dir( config.output_dir );
+    Common_tools::create_dir( config.output_dir + "/frames" );
 
-    Common_tools::get_ros_parameter( nh, "offline_colorize/dataset_root", dataset_root, std::string() );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/input_mode", input_mode, std::string( "directory_layout" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/frame_list", frame_list_path, std::string( "frames.txt" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/pose_dir", pose_dir, std::string( "pos" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/pcd_dir", pcd_dir, std::string( "pcd" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/image_extension", image_extension, std::string( ".jpg" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/output_dir", output_dir,
-                                     std::string( Common_tools::get_home_folder() ).append( "/r3live_offline_output" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/append_global_map_point_step", append_step, 1 );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/save_frame_colored_pcd", save_frame_colored_pcd, 1 );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/save_offline_map", save_offline_map, 0 );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/frame_point_in_world", frame_point_in_world, 0 );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/minimum_pts_size", minimum_pts_size, 0.05 );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/camera_selection_mode", selection_mode_name, std::string( "nearest_distance" ) );
-    Common_tools::get_ros_parameter( nh, "offline_colorize/sample_mode", sample_mode_name, std::string( "bilinear" ) );
-    nh.getParam( "offline_colorize/camera_names", camera_names );
-
-    frame_list_path = resolve_path( dataset_root, frame_list_path );
-    Common_tools::create_dir( output_dir );
-    Common_tools::create_dir( output_dir + "/frames" );
-
-    if ( camera_names.empty() )
+    if ( config.camera_names.empty() )
     {
         cout << ANSI_COLOR_RED_BOLD << "offline_colorize/camera_names is empty." << ANSI_COLOR_RESET << endl;
         return -1;
     }
 
-    std::vector< OfflineCameraConfig > cameras( camera_names.size() );
-    for ( size_t idx = 0; idx < camera_names.size(); ++idx )
+    std::vector< OfflineCameraConfig > cameras( config.camera_names.size() );
+    for ( size_t idx = 0; idx < config.camera_names.size(); ++idx )
     {
-        if ( load_camera_config( nh, camera_names[ idx ], cameras[ idx ] ) == false )
+        if ( load_camera_config( offline_node, config.camera_names[ idx ], cameras[ idx ] ) == false )
         {
             return -1;
         }
     }
 
     std::vector< OfflineFrameEntry > frames;
-    if ( input_mode == "directory_layout" )
+    if ( config.input_mode == "directory_layout" )
     {
-        if ( build_frames_from_directory_layout( dataset_root, pose_dir, pcd_dir, camera_names, image_extension, frames ) == false )
+        if ( build_frames_from_directory_layout( config.dataset_root, config.pose_dir, config.pcd_dir, config.camera_names,
+                                                 config.image_extension, frames ) == false )
         {
-            cout << ANSI_COLOR_RED_BOLD << "Failed to build frames from directory layout under " << dataset_root << ANSI_COLOR_RESET
+            cout << ANSI_COLOR_RED_BOLD << "Failed to build frames from directory layout under " << config.dataset_root << ANSI_COLOR_RESET
                  << endl;
             return -1;
         }
     }
-    else if ( parse_frame_list( frame_list_path, dataset_root, cameras.size(), frames ) == false )
+    else if ( parse_frame_list( config.frame_list, config.dataset_root, cameras.size(), frames ) == false )
     {
-        cout << ANSI_COLOR_RED_BOLD << "Failed to parse frame list: " << frame_list_path << ANSI_COLOR_RESET << endl;
+        cout << ANSI_COLOR_RED_BOLD << "Failed to parse frame list: " << config.frame_list << ANSI_COLOR_RESET << endl;
         return -1;
     }
 
     Global_map            global_map( 0 );
     Offline_map_recorder  recorder;
     OfflineStats          total_stats( cameras.size() );
-    const int             selection_mode = selection_mode_from_string( selection_mode_name );
-    const int             sample_mode = sample_mode_from_string( sample_mode_name );
+    const int             selection_mode = selection_mode_from_string( config.camera_selection_mode );
+    const int             sample_mode = sample_mode_from_string( config.sample_mode );
     recorder.m_global_map = &global_map;
-    recorder.set_working_dir( output_dir );
-    global_map.set_minmum_dis( minimum_pts_size );
+    recorder.set_working_dir( config.output_dir );
+    global_map.set_minmum_dis( config.minimum_pts_size );
 
     scope_color( ANSI_COLOR_GREEN_BOLD );
     cout << "Offline colorize frames: " << frames.size() << ", cameras: " << cameras.size() << ANSI_COLOR_RESET << endl;
@@ -703,7 +814,7 @@ int main( int argc, char **argv )
             return -1;
         }
 
-        if ( frame_point_in_world )
+        if ( config.frame_point_in_world )
         {
             frame_cloud_world = frame_cloud_lidar;
         }
@@ -712,7 +823,8 @@ int main( int argc, char **argv )
             transform_cloud_to_world( frame_cloud_lidar, frames[ frame_idx ].lidar_q, frames[ frame_idx ].lidar_t, frame_cloud_world );
         }
 
-        global_map.append_points_to_global_map( frame_cloud_world, frames[ frame_idx ].timestamp, &frame_points, append_step );
+        global_map.append_points_to_global_map( frame_cloud_world, frames[ frame_idx ].timestamp, &frame_points,
+                                                config.append_global_map_point_step );
 
         for ( size_t camera_idx = 0; camera_idx < cameras.size(); ++camera_idx )
         {
@@ -727,12 +839,12 @@ int main( int argc, char **argv )
         }
 
         OfflineStats frame_stats =
-            colorize_frame_points( images, frame_points, save_offline_map ? &points_per_camera : nullptr, frames[ frame_idx ].timestamp,
-                                   sample_mode, selection_mode );
+            colorize_frame_points( images, frame_points, config.save_offline_map ? &points_per_camera : nullptr,
+                                   frames[ frame_idx ].timestamp, sample_mode, selection_mode );
         total_stats.merge( frame_stats );
         log_stats( frame_stats, frame_idx, cameras );
 
-        if ( save_offline_map )
+        if ( config.save_offline_map )
         {
             for ( size_t camera_idx = 0; camera_idx < images.size(); ++camera_idx )
             {
@@ -740,16 +852,16 @@ int main( int argc, char **argv )
             }
         }
 
-        if ( save_frame_colored_pcd )
+        if ( config.save_frame_colored_pcd )
         {
             std::ostringstream oss;
-            oss << output_dir << "/frames/frame_" << std::setw( 6 ) << std::setfill( '0' ) << frame_idx << "_rgb.pcd";
+            oss << config.output_dir << "/frames/frame_" << std::setw( 6 ) << std::setfill( '0' ) << frame_idx << "_rgb.pcd";
             save_frame_cloud( oss.str(), frame_points );
         }
     }
 
-    global_map.save_to_pcd( output_dir, "/rgb_map", 1 );
-    if ( save_offline_map )
+    global_map.save_to_pcd( config.output_dir, "/rgb_map", 1 );
+    if ( config.save_offline_map )
     {
         recorder.export_to_mvs( global_map );
     }

@@ -108,8 +108,8 @@ source ~/catkin_ws/devel/setup.bash
 
 ### 4.2 Offline input: per-frame PCD + per-frame multi-camera JPG
 - Offline executable: `r3live_offline_colorize`
-- Launch file: `/home/runner/work/use_r3live/use_r3live/r3live/launch/r3live_offline_colorize.launch`
 - Config file: `/home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml`
+- The offline executable no longer depends on ROS runtime or the ROS parameter server; it reads this YAML config file directly
 - Default interface now supports this directory layout directly:
 ```text
 dataset_root/
@@ -137,9 +137,13 @@ dataset_root/
   - optional per-frame colored clouds: `output_dir/frames/frame_000000_rgb.pcd`
   - optional offline `.r3live` export if `offline_colorize/save_offline_map=1`
 - `offline_colorize/minimum_pts_size` controls the point dedup spacing before color fusion
-- Run:
+- Run without ROS:
 ```bash
-roslaunch r3live r3live_offline_colorize.launch
+/path/to/r3live_offline_colorize /home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml
+```
+- Optional dataset root override:
+```bash
+/path/to/r3live_offline_colorize /home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml /data/my_seq
 ```
 
 ## 5. Run our examples

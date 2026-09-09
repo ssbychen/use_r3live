@@ -1,6 +1,10 @@
 offline_colorize:
   dataset_root: "/tmp/r3live_offline_dataset"
+  input_mode: "directory_layout"   # directory_layout | frame_list
   frame_list: "frames.txt"
+  pose_dir: "pos"
+  pcd_dir: "pcd"
+  image_extension: ".jpg"
   output_dir: "/tmp/r3live_offline_output"
   append_global_map_point_step: 1
   minimum_pts_size: 0.05

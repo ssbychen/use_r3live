@@ -110,6 +110,23 @@ source ~/catkin_ws/devel/setup.bash
 - Offline executable: `r3live_offline_colorize`
 - Launch file: `/home/runner/work/use_r3live/use_r3live/r3live/launch/r3live_offline_colorize.launch`
 - Config file: `/home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml`
+- Default interface now supports this directory layout directly:
+```text
+dataset_root/
+├── pos/000000.txt
+├── pcd/000000.pcd
+├── cam0/000000.jpg
+└── cam1/000000.jpg
+```
+- Enable the directory-based interface with:
+  - `offline_colorize/input_mode: "directory_layout"`
+  - `offline_colorize/pose_dir: "pos"`
+  - `offline_colorize/pcd_dir: "pcd"`
+  - `offline_colorize/image_extension: ".jpg"`
+- For directory mode, frames are matched by basename; for example `pcd/000123.pcd` must pair with `pos/000123.txt`, `cam0/000123.jpg`, `cam1/000123.jpg`, ...
+- Pose file format for each `pos/<frame>.txt`:
+  - `qw qx qy qz tx ty tz`
+  - or `timestamp qw qx qy qz tx ty tz`
 - Expected frame list format (one frame per line, space-separated):
   - `timestamp pcd_path tx ty tz qw qx qy qz img_cam0 img_cam1 ...`
   - `tx ty tz qw qx qy qz` is the LiDAR pose in world coordinates for that frame

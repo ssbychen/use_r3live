@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cstdint>
+#include <dirent.h>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <sys/stat.h>
 #include <vector>
 #include <cstring>
 
@@ -40,7 +42,9 @@ struct OfflineCameraConfig
 struct OfflineFrameEntry
 {
     double                     timestamp = 0.0;
+    std::string                frame_id;
     std::string                pcd_path;
+    std::string                pose_path;
     Eigen::Vector3d            lidar_t = Eigen::Vector3d::Zero();
     Eigen::Quaterniond         lidar_q = Eigen::Quaterniond::Identity();
     std::vector< std::string > image_paths;
@@ -108,6 +112,110 @@ std::string resolve_path( const std::string &dataset_root, const std::string &pa
         return dataset_root + path;
     }
     return dataset_root + "/" + path;
+}
+
+std::string get_file_stem( const std::string &path )
+{
+    const size_t slash_pos = path.find_last_of( "/\\" );
+    const size_t begin = ( slash_pos == std::string::npos ) ? 0 : slash_pos + 1;
+    const size_t dot_pos = path.find_last_of( '.' );
+    if ( dot_pos == std::string::npos || dot_pos < begin )
+    {
+        return path.substr( begin );
+    }
+    return path.substr( begin, dot_pos - begin );
+}
+
+bool is_regular_file( const std::string &path )
+{
+    struct stat st;
+    if ( stat( path.c_str(), &st ) != 0 )
+    {
+        return false;
+    }
+    return S_ISREG( st.st_mode );
+}
+
+bool has_suffix( const std::string &value, const std::string &suffix )
+{
+    if ( value.size() < suffix.size() )
+    {
+        return false;
+    }
+    return value.compare( value.size() - suffix.size(), suffix.size(), suffix ) == 0;
+}
+
+std::vector< std::string > list_files_with_suffix( const std::string &dir_path, const std::string &suffix )
+{
+    std::vector< std::string > file_paths;
+    DIR *                      dir = opendir( dir_path.c_str() );
+    if ( dir == nullptr )
+    {
+        return file_paths;
+    }
+
+    while ( true )
+    {
+        dirent *entry = readdir( dir );
+        if ( entry == nullptr )
+        {
+            break;
+        }
+
+        const std::string file_name = entry->d_name;
+        if ( file_name == "." || file_name == ".." )
+        {
+            continue;
+        }
+        if ( has_suffix( file_name, suffix ) == false )
+        {
+            continue;
+        }
+        const std::string full_path = resolve_path( dir_path, file_name );
+        if ( is_regular_file( full_path ) )
+        {
+            file_paths.push_back( full_path );
+        }
+    }
+
+    closedir( dir );
+    std::sort( file_paths.begin(), file_paths.end() );
+    return file_paths;
+}
+
+bool load_pose_file( const std::string &pose_path, OfflineFrameEntry &frame )
+{
+    Eigen::MatrixXd pose_data = Common_tools::load_mat_from_txt< double >( pose_path );
+    std::vector< double > values;
+    for ( int row = 0; row < pose_data.rows(); ++row )
+    {
+        for ( int col = 0; col < pose_data.cols(); ++col )
+        {
+            values.push_back( pose_data( row, col ) );
+        }
+    }
+
+    if ( values.size() == 7 )
+    {
+        frame.lidar_q = Eigen::Quaterniond( values[ 0 ], values[ 1 ], values[ 2 ], values[ 3 ] );
+        frame.lidar_t << values[ 4 ], values[ 5 ], values[ 6 ];
+    }
+    else if ( values.size() == 8 )
+    {
+        frame.timestamp = values[ 0 ];
+        frame.lidar_q = Eigen::Quaterniond( values[ 1 ], values[ 2 ], values[ 3 ], values[ 4 ] );
+        frame.lidar_t << values[ 5 ], values[ 6 ], values[ 7 ];
+    }
+    else
+    {
+        cout << ANSI_COLOR_RED_BOLD << "Unsupported pose format in " << pose_path
+             << ", expected 7 values (qw qx qy qz tx ty tz) or 8 values (timestamp qw qx qy qz tx ty tz)." << ANSI_COLOR_RESET
+             << endl;
+        return false;
+    }
+
+    frame.lidar_q.normalize();
+    return true;
 }
 
 bool load_camera_config( ros::NodeHandle &nh, const std::string &camera_name, OfflineCameraConfig &camera )
@@ -325,6 +433,7 @@ bool parse_frame_list( const std::string &frame_list_path, const std::string &da
         }
 
         frame.timestamp = std::stod( tokens[ 0 ] );
+        frame.frame_id = get_file_stem( tokens[ 1 ] );
         frame.pcd_path = resolve_path( dataset_root, tokens[ 1 ] );
         frame.lidar_t << std::stod( tokens[ 2 ] ), std::stod( tokens[ 3 ] ), std::stod( tokens[ 4 ] );
         frame.lidar_q = Eigen::Quaterniond( std::stod( tokens[ 5 ] ), std::stod( tokens[ 6 ] ), std::stod( tokens[ 7 ] ),
@@ -333,6 +442,55 @@ bool parse_frame_list( const std::string &frame_list_path, const std::string &da
         for ( size_t idx = 0; idx < camera_count; ++idx )
         {
             frame.image_paths.push_back( resolve_path( dataset_root, tokens[ 9 + idx ] ) );
+        }
+        frames.push_back( frame );
+    }
+
+    return !frames.empty();
+}
+
+bool build_frames_from_directory_layout( const std::string &dataset_root, const std::string &pose_dir, const std::string &pcd_dir,
+                                         const std::vector< std::string > &camera_names, const std::string &image_extension,
+                                         std::vector< OfflineFrameEntry > &frames )
+{
+    const std::string pcd_root = resolve_path( dataset_root, pcd_dir );
+    const std::string pose_root = resolve_path( dataset_root, pose_dir );
+    std::vector< std::string > pcd_files = list_files_with_suffix( pcd_root, ".pcd" );
+    frames.clear();
+
+    if ( pcd_files.empty() )
+    {
+        cout << ANSI_COLOR_RED_BOLD << "No .pcd files found in " << pcd_root << ANSI_COLOR_RESET << endl;
+        return false;
+    }
+
+    for ( size_t idx = 0; idx < pcd_files.size(); ++idx )
+    {
+        OfflineFrameEntry frame;
+        frame.frame_id = get_file_stem( pcd_files[ idx ] );
+        frame.timestamp = static_cast< double >( idx );
+        frame.pcd_path = pcd_files[ idx ];
+        frame.pose_path = resolve_path( pose_root, frame.frame_id + ".txt" );
+        if ( is_regular_file( frame.pose_path ) == false )
+        {
+            cout << ANSI_COLOR_RED_BOLD << "Missing pose file: " << frame.pose_path << ANSI_COLOR_RESET << endl;
+            return false;
+        }
+        if ( load_pose_file( frame.pose_path, frame ) == false )
+        {
+            return false;
+        }
+
+        for ( size_t camera_idx = 0; camera_idx < camera_names.size(); ++camera_idx )
+        {
+            const std::string image_path =
+                resolve_path( dataset_root, camera_names[ camera_idx ] + "/" + frame.frame_id + image_extension );
+            if ( is_regular_file( image_path ) == false )
+            {
+                cout << ANSI_COLOR_RED_BOLD << "Missing image file: " << image_path << ANSI_COLOR_RESET << endl;
+                return false;
+            }
+            frame.image_paths.push_back( image_path );
         }
         frames.push_back( frame );
     }
@@ -459,6 +617,7 @@ int main( int argc, char **argv )
     ros::NodeHandle nh;
 
     std::string dataset_root, frame_list_path, output_dir, selection_mode_name, sample_mode_name;
+    std::string pose_dir, pcd_dir, image_extension, input_mode;
     std::vector< std::string > camera_names;
     int append_step = 1;
     int save_frame_colored_pcd = 1;
@@ -467,7 +626,11 @@ int main( int argc, char **argv )
     double minimum_pts_size = 0.05;
 
     Common_tools::get_ros_parameter( nh, "offline_colorize/dataset_root", dataset_root, std::string() );
+    Common_tools::get_ros_parameter( nh, "offline_colorize/input_mode", input_mode, std::string( "directory_layout" ) );
     Common_tools::get_ros_parameter( nh, "offline_colorize/frame_list", frame_list_path, std::string( "frames.txt" ) );
+    Common_tools::get_ros_parameter( nh, "offline_colorize/pose_dir", pose_dir, std::string( "pos" ) );
+    Common_tools::get_ros_parameter( nh, "offline_colorize/pcd_dir", pcd_dir, std::string( "pcd" ) );
+    Common_tools::get_ros_parameter( nh, "offline_colorize/image_extension", image_extension, std::string( ".jpg" ) );
     Common_tools::get_ros_parameter( nh, "offline_colorize/output_dir", output_dir,
                                      std::string( Common_tools::get_home_folder() ).append( "/r3live_offline_output" ) );
     Common_tools::get_ros_parameter( nh, "offline_colorize/append_global_map_point_step", append_step, 1 );
@@ -499,7 +662,16 @@ int main( int argc, char **argv )
     }
 
     std::vector< OfflineFrameEntry > frames;
-    if ( parse_frame_list( frame_list_path, dataset_root, cameras.size(), frames ) == false )
+    if ( input_mode == "directory_layout" )
+    {
+        if ( build_frames_from_directory_layout( dataset_root, pose_dir, pcd_dir, camera_names, image_extension, frames ) == false )
+        {
+            cout << ANSI_COLOR_RED_BOLD << "Failed to build frames from directory layout under " << dataset_root << ANSI_COLOR_RESET
+                 << endl;
+            return -1;
+        }
+    }
+    else if ( parse_frame_list( frame_list_path, dataset_root, cameras.size(), frames ) == false )
     {
         cout << ANSI_COLOR_RED_BOLD << "Failed to parse frame list: " << frame_list_path << ANSI_COLOR_RESET << endl;
         return -1;

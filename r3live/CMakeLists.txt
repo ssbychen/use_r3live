@@ -8,7 +8,22 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(USE_C_COLORIZE "Use the C colorize core for RGB map projection/sampling" ON)
+option(VERIFY_C_COLORIZE "Compare the C colorize core with the legacy C++ path" OFF)
+
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
+
+if(USE_C_COLORIZE)
+  add_definitions(-DR3LIVE_USE_C_COLORIZE=1)
+else()
+  add_definitions(-DR3LIVE_USE_C_COLORIZE=0)
+endif()
+
+if(VERIFY_C_COLORIZE)
+  add_definitions(-DR3LIVE_VERIFY_C_COLORIZE=1)
+else()
+  add_definitions(-DR3LIVE_VERIFY_C_COLORIZE=0)
+endif()
 
 # Add OpenCV if available
 # set(OpenCV_DIR "/home/zivlin/opt/opencv/build")
@@ -81,6 +96,11 @@ include_directories(
 
 catkin_package()
 
+set(C_COLORIZE_SOURCES
+  src/c_colorize/colorize.c
+)
+set_source_files_properties(${C_COLORIZE_SOURCES} PROPERTIES LANGUAGE C)
+
 message(STATUS "===== ${PROJECT_NAME}: OpenCV library status: =====")
 message(STATUS "===== OpenCV ersion: ${OpenCV_VERSION}  =====")
 message(STATUS "===== OpenCV libraries: ${OpenCV_LIBS} =====")
@@ -104,6 +124,7 @@ add_executable(r3live_mapping src/r3live.cpp
                 src/loam/include/kd_tree/ikd_Tree.cpp
                 src/loam/include/FOV_Checker/FOV_Checker.cpp 
                 src/loam/IMU_Processing.cpp
+                ${C_COLORIZE_SOURCES}
                 src/rgb_map/offline_map_recorder.cpp
                 # From VIO
                 src/r3live_vio.cpp
@@ -132,6 +153,7 @@ if(CGAL_FOUND)
   SET(_USE_OPENMP TRUE)
   SET(_USE_EIGEN TRUE)
   add_executable(r3live_meshing src/r3live_reconstruct_mesh.cpp                              
+                                ${C_COLORIZE_SOURCES}
                                 src/rgb_map/image_frame.cpp
                                 src/rgb_map/pointcloud_rgbd.cpp  
                                 # Common

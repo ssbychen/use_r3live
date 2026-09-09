@@ -95,6 +95,17 @@ catkin_make
 source ~/catkin_ws/devel/setup.bash
 ```
 
+### 4.1 C colorize core
+- Core C module: `r3live/src/c_colorize/colorize.h` and `r3live/src/c_colorize/colorize.c`
+- C++ adapter path: `r3live/src/rgb_map/pointcloud_rgbd.cpp`
+- Original colorization path: `r3live/src/r3live_vio.cpp` triggers rendering, `r3live/src/rgb_map/pointcloud_rgbd.cpp` selects/map points and updates RGB state, and `r3live/src/rgb_map/image_frame.cpp` performs projection plus bilinear image sampling
+- Adapter-only dependencies kept in C++: `Eigen` pose/intrinsic storage, `OpenCV` `cv::Mat` image ownership, `PCL` point containers, STL/threading, and ROS call sites
+- Build switches:
+  - `-DUSE_C_COLORIZE=ON|OFF` selects the new C core or the legacy C++ colorization path
+  - `-DVERIFY_C_COLORIZE=ON` keeps the active path unchanged but prints validation statistics against the legacy path
+- Validation log output includes projection success/failure counts, out-of-bounds counts, per-camera hit counts, and mean/max color difference when both paths succeed
+- Current limitation: the runtime adapter still feeds a single `Image_frame` because the repository’s live RGB map path is single-camera today, but the C API already accepts a camera array so a future multi-camera adapter can reuse the same core
+
 ## 5. Run our examples
 ### 5.1 Download our rosbag files ([r3live_dataset](https://github.com/ziv-lin/r3live_dataset)) 
 Our datasets for evaluation can be download from our [Google drive](https://drive.google.com/drive/folders/15i-TRa0EA8BCbNdARVqPMDsU9JOlagVF?usp=sharing) or [Baidu-NetDisk [百度网盘]](https://pan.baidu.com/s/1zmVxkcwOSul8oTBwaHfuFg) (code提取码: wwxw). We have released totally **9** rosbag files for evaluating r3live, with the introduction of these datasets can be found on this [page](https://github.com/ziv-lin/r3live_dataset).

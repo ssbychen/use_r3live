@@ -97,6 +97,7 @@ struct OfflineAppConfig
     int                       append_global_map_point_step = 1;
     int                       save_frame_colored_pcd = 1;
     int                       save_offline_map = 0;
+    int                       use_frame_pose = 1;
     int                       frame_point_in_world = 0;
     double                    minimum_pts_size = 0.05;
 };
@@ -338,6 +339,7 @@ bool load_app_config( const std::string &config_path, OfflineAppConfig &config )
     read_scalar_or_default( offline_node, "append_global_map_point_step", config.append_global_map_point_step );
     read_scalar_or_default( offline_node, "save_frame_colored_pcd", config.save_frame_colored_pcd );
     read_scalar_or_default( offline_node, "save_offline_map", config.save_offline_map );
+    read_scalar_or_default( offline_node, "use_frame_pose", config.use_frame_pose );
     read_scalar_or_default( offline_node, "frame_point_in_world", config.frame_point_in_world );
     read_scalar_or_default( offline_node, "minimum_pts_size", config.minimum_pts_size );
     read_string_array( offline_node[ "camera_names" ], config.camera_names );
@@ -499,7 +501,7 @@ void fill_colorize_inputs( const std::vector< std::shared_ptr< Image_frame > > &
     }
 }
 
-bool parse_frame_list( const std::string &frame_list_path, const std::string &dataset_root, size_t camera_count,
+bool parse_frame_list( const std::string &frame_list_path, const std::string &dataset_root, size_t camera_count, bool use_frame_pose,
                        std::vector< OfflineFrameEntry > &frames )
 {
     std::ifstream ifs( frame_list_path.c_str() );
@@ -536,9 +538,13 @@ bool parse_frame_list( const std::string &frame_list_path, const std::string &da
             tokens.push_back( token );
         }
 
-        if ( tokens.size() != 9 + camera_count )
+        const size_t expected_with_pose = 9 + camera_count;
+        const size_t expected_without_pose = 2 + camera_count;
+        if ( tokens.size() != expected_with_pose && ( use_frame_pose || tokens.size() != expected_without_pose ) )
         {
-            cout << ANSI_COLOR_RED_BOLD << "Invalid frame list line " << line_number << ": expected " << ( 9 + camera_count )
+            cout << ANSI_COLOR_RED_BOLD << "Invalid frame list line " << line_number << ": expected "
+                 << ( use_frame_pose ? std::to_string( expected_with_pose ) : std::to_string( expected_without_pose ) + " or " +
+                                                                        std::to_string( expected_with_pose ) )
                  << " columns, got " << tokens.size() << ANSI_COLOR_RESET << endl;
             return false;
         }
@@ -546,13 +552,19 @@ bool parse_frame_list( const std::string &frame_list_path, const std::string &da
         frame.timestamp = std::stod( tokens[ 0 ] );
         frame.frame_id = get_file_stem( tokens[ 1 ] );
         frame.pcd_path = resolve_path( dataset_root, tokens[ 1 ] );
-        frame.lidar_t << std::stod( tokens[ 2 ] ), std::stod( tokens[ 3 ] ), std::stod( tokens[ 4 ] );
-        frame.lidar_q = Eigen::Quaterniond( std::stod( tokens[ 5 ] ), std::stod( tokens[ 6 ] ), std::stod( tokens[ 7 ] ),
-                                            std::stod( tokens[ 8 ] ) );
-        frame.lidar_q.normalize();
+
+        size_t image_token_offset = 2;
+        if ( tokens.size() == expected_with_pose )
+        {
+            frame.lidar_t << std::stod( tokens[ 2 ] ), std::stod( tokens[ 3 ] ), std::stod( tokens[ 4 ] );
+            frame.lidar_q = Eigen::Quaterniond( std::stod( tokens[ 5 ] ), std::stod( tokens[ 6 ] ), std::stod( tokens[ 7 ] ),
+                                                std::stod( tokens[ 8 ] ) );
+            frame.lidar_q.normalize();
+            image_token_offset = 9;
+        }
         for ( size_t idx = 0; idx < camera_count; ++idx )
         {
-            frame.image_paths.push_back( resolve_path( dataset_root, tokens[ 9 + idx ] ) );
+            frame.image_paths.push_back( resolve_path( dataset_root, tokens[ image_token_offset + idx ] ) );
         }
         frames.push_back( frame );
     }
@@ -562,6 +574,7 @@ bool parse_frame_list( const std::string &frame_list_path, const std::string &da
 
 bool build_frames_from_directory_layout( const std::string &dataset_root, const std::string &pose_dir, const std::string &pcd_dir,
                                          const std::vector< std::string > &camera_names, const std::string &image_extension,
+                                         bool use_frame_pose,
                                          std::vector< OfflineFrameEntry > &frames )
 {
     const std::string pcd_root = resolve_path( dataset_root, pcd_dir );
@@ -581,15 +594,24 @@ bool build_frames_from_directory_layout( const std::string &dataset_root, const 
         frame.frame_id = get_file_stem( pcd_files[ idx ] );
         frame.timestamp = static_cast< double >( idx );
         frame.pcd_path = pcd_files[ idx ];
-        frame.pose_path = resolve_path( pose_root, frame.frame_id + ".txt" );
-        if ( is_regular_file( frame.pose_path ) == false )
+        frame.pose_path.clear();
+        if ( use_frame_pose == false )
         {
-            cout << ANSI_COLOR_RED_BOLD << "Missing pose file: " << frame.pose_path << ANSI_COLOR_RESET << endl;
-            return false;
+            frame.lidar_t.setZero();
+            frame.lidar_q = Eigen::Quaterniond::Identity();
         }
-        if ( load_pose_file( frame.pose_path, frame ) == false )
+        else
         {
-            return false;
+            frame.pose_path = resolve_path( pose_root, frame.frame_id + ".txt" );
+            if ( is_regular_file( frame.pose_path ) == false )
+            {
+                cout << ANSI_COLOR_RED_BOLD << "Missing pose file: " << frame.pose_path << ANSI_COLOR_RESET << endl;
+                return false;
+            }
+            if ( load_pose_file( frame.pose_path, frame ) == false )
+            {
+                return false;
+            }
         }
 
         for ( size_t camera_idx = 0; camera_idx < camera_names.size(); ++camera_idx )
@@ -775,14 +797,14 @@ int main( int argc, char **argv )
     if ( config.input_mode == "directory_layout" )
     {
         if ( build_frames_from_directory_layout( config.dataset_root, config.pose_dir, config.pcd_dir, config.camera_names,
-                                                 config.image_extension, frames ) == false )
+                                             config.image_extension, config.use_frame_pose != 0, frames ) == false )
         {
             cout << ANSI_COLOR_RED_BOLD << "Failed to build frames from directory layout under " << config.dataset_root << ANSI_COLOR_RESET
                  << endl;
             return -1;
         }
     }
-    else if ( parse_frame_list( config.frame_list, config.dataset_root, cameras.size(), frames ) == false )
+    else if ( parse_frame_list( config.frame_list, config.dataset_root, cameras.size(), config.use_frame_pose != 0, frames ) == false )
     {
         cout << ANSI_COLOR_RED_BOLD << "Failed to parse frame list: " << config.frame_list << ANSI_COLOR_RESET << endl;
         return -1;
@@ -799,6 +821,18 @@ int main( int argc, char **argv )
 
     scope_color( ANSI_COLOR_GREEN_BOLD );
     cout << "Offline colorize frames: " << frames.size() << ", cameras: " << cameras.size() << ANSI_COLOR_RESET << endl;
+    if ( config.use_frame_pose == 0 )
+    {
+        scope_color( ANSI_COLOR_YELLOW_BOLD );
+        cout << "Offline colorize is running without frame pose files; LiDAR pose defaults to identity for every frame."
+             << ANSI_COLOR_RESET << endl;
+        if ( frames.size() > 1 )
+        {
+            cout << ANSI_COLOR_YELLOW_BOLD
+                 << "Multiple frames detected in no-pose mode; outputs are only meaningful when frames already share one coordinate system."
+                 << ANSI_COLOR_RESET << endl;
+        }
+    }
 
     for ( size_t frame_idx = 0; frame_idx < frames.size(); ++frame_idx )
     {

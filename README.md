@@ -123,6 +123,7 @@ dataset_root/
   - `offline_colorize/pose_dir: "pos"`
   - `offline_colorize/pcd_dir: "pcd"`
   - `offline_colorize/image_extension: ".jpg"`
+- `offline_colorize/use_frame_pose: 1` keeps the original pose-based behavior; set it to `0` for single-frame/no-pose input
 - For directory mode, frames are matched by basename; for example `pcd/000123.pcd` must pair with `pos/000123.txt`, `cam0/000123.jpg`, `cam1/000123.jpg`, ...
 - Pose file format for each `pos/<frame>.txt`:
   - `qw qx qy qz tx ty tz`
@@ -131,6 +132,9 @@ dataset_root/
   - `timestamp pcd_path tx ty tz qw qx qy qz img_cam0 img_cam1 ...`
   - `tx ty tz qw qx qy qz` is the LiDAR pose in world coordinates for that frame
   - image columns must appear in the same order as `offline_colorize/camera_names`
+- When `offline_colorize/use_frame_pose: 0`, `pos/<frame>.txt` is not required and frame-list mode also accepts:
+  - `timestamp pcd_path img_cam0 img_cam1 ...`
+- In no-pose mode, LiDAR pose defaults to identity for every frame, so this mode is intended for single-frame colorization or already world-aligned point clouds
 - Camera parameters are configured once under `offline_colorize/cameras/<camera_name>/...`
 - Output:
   - accumulated colored map: `output_dir/rgb_map.pcd`
@@ -145,6 +149,17 @@ dataset_root/
 ```bash
 /path/to/r3live_offline_colorize /home/runner/work/use_r3live/use_r3live/config/offline_colorize_config.yaml /data/my_seq
 ```
+- Example no-pose single-frame setup:
+```text
+dataset_root/
+├── pcd/000000.pcd
+├── cam0/000000.jpg
+└── cam1/000000.jpg
+```
+- Use:
+  - `offline_colorize/input_mode: "directory_layout"`
+  - `offline_colorize/use_frame_pose: 0`
+  - `offline_colorize/frame_point_in_world: 0` when the PCD is still in LiDAR coordinates
 
 ## 5. Run our examples
 ### 5.1 Download our rosbag files ([r3live_dataset](https://github.com/ziv-lin/r3live_dataset)) 

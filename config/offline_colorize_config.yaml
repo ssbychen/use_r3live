@@ -10,6 +10,7 @@ offline_colorize:
   minimum_pts_size: 0.05
   save_frame_colored_pcd: 1
   save_offline_map: 0
+  use_frame_pose: 1                          # 1: require frame pose input, 0: single-frame/no-pose mode
   frame_point_in_world: 0
   camera_selection_mode: "nearest_distance"   # nearest_distance | first_valid
   sample_mode: "bilinear"                     # bilinear | nearest
